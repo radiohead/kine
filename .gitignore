@@ -68,3 +68,4 @@ db/
 # build artifacts
 bin/
 dist/
+.docker.out
