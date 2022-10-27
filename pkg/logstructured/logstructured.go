@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/k3s-io/kine/pkg/metrics"
 	"github.com/k3s-io/kine/pkg/server"
 	"github.com/sirupsen/logrus"
 )
@@ -256,6 +257,7 @@ func (l *LogStructured) Update(ctx context.Context, key string, value []byte, re
 	return rev, updateEvent.KV, true, err
 }
 
+// TODO: this might be where it's leaking.
 func (l *LogStructured) ttlEvents(ctx context.Context) chan *server.Event {
 	result := make(chan *server.Event)
 	wg := sync.WaitGroup{}
@@ -304,11 +306,15 @@ func (l *LogStructured) ttl(ctx context.Context) {
 	mutex := &sync.Mutex{}
 	for event := range l.ttlEvents(ctx) {
 		go func(event *server.Event) {
+			metrics.TTLGoroutineCount.Inc()
+			defer metrics.TTLGoroutineCount.Dec()
+
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(time.Duration(event.KV.Lease) * time.Second):
 			}
+
 			mutex.Lock()
 			if _, _, _, err := l.Delete(ctx, event.KV.Key, event.KV.ModRevision); err != nil {
 				logrus.Errorf("failed to delete expired key: %v", err)
@@ -340,7 +346,11 @@ func (l *LogStructured) Watch(ctx context.Context, prefix string, revision int64
 
 	logrus.Tracef("WATCH LIST key=%s rev=%d => rev=%d kvs=%d", prefix, revision, rev, len(kvs))
 
+	// TODO: add a metric here
 	go func() {
+		metrics.WatchGoroutineCount.Inc()
+		defer metrics.WatchGoroutineCount.Dec()
+
 		lastRevision := revision
 		if len(kvs) > 0 {
 			lastRevision = rev

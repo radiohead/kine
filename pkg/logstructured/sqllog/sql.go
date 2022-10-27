@@ -369,7 +369,7 @@ func (s *SQLLog) startWatch() (chan interface{}, error) {
 	// start compaction and polling at the same time to watch starts
 	// at the oldest revision, but compaction doesn't create gaps
 	go s.compactor(compactInterval)
-	go s.poll(c, pollStart)
+	go s.poll(c, pollStart) // TODO: profile this further
 	return c, nil
 }
 

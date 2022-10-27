@@ -30,6 +30,16 @@ var (
 		Name: "kine_compact_total",
 		Help: "Total number of compactions",
 	}, []string{"result"})
+
+	TTLGoroutineCount = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "kine_ttl_cleanup_goroutines",
+		Help: "Number of active TTL expiry goroutines",
+	})
+
+	WatchGoroutineCount = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "kine_active_watch_goroutines",
+		Help: "Number of active WATCH goroutines",
+	})
 )
 
 var (
