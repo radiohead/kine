@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/k3s-io/kine/pkg/drivers/cockroach"
 	"github.com/k3s-io/kine/pkg/drivers/dqlite"
 	"github.com/k3s-io/kine/pkg/drivers/generic"
 	"github.com/k3s-io/kine/pkg/drivers/jetstream"
@@ -34,6 +35,7 @@ const (
 	JetStreamBackend = "jetstream"
 	MySQLBackend     = "mysql"
 	PostgresBackend  = "postgres"
+	CockroachBackend = "cockroach"
 )
 
 type Config struct {
@@ -247,6 +249,8 @@ func getKineStorageBackend(ctx context.Context, driver, dsn string, cfg Config) 
 		backend, err = dqlite.New(ctx, dsn, cfg.ConnectionPoolConfig, cfg.MetricsRegisterer)
 	case PostgresBackend:
 		backend, err = pgsql.New(ctx, dsn, cfg.BackendTLSConfig, cfg.ConnectionPoolConfig, cfg.MetricsRegisterer)
+	case CockroachBackend:
+		backend, err = cockroach.New(ctx, dsn, cfg.BackendTLSConfig, cfg.ConnectionPoolConfig, cfg.MetricsRegisterer)
 	case MySQLBackend:
 		backend, err = mysql.New(ctx, dsn, cfg.BackendTLSConfig, cfg.ConnectionPoolConfig, cfg.MetricsRegisterer)
 	case JetStreamBackend:
