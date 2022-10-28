@@ -35,13 +35,23 @@ func (l *LogStructured) Start(ctx context.Context) error {
 	if err := l.log.Start(ctx); err != nil {
 		return err
 	}
+
 	// See https://github.com/kubernetes/kubernetes/blob/442a69c3bdf6fe8e525b05887e57d89db1e2f3a5/staging/src/k8s.io/apiserver/pkg/storage/storagebackend/factory/etcd3.go#L97
 	if _, err := l.Create(ctx, "/registry/health", []byte(`{"health":"true"}`), 0); err != nil {
 		if err != server.ErrKeyExists {
 			logrus.Errorf("Failed to create health check key: %v", err)
 		}
 	}
-	go l.ttl(ctx)
+
+	go l.ttlExpirer(
+		ctx,
+		l.ttlEvents(ctx),
+		func(ctx context.Context, key string, rev int64) error {
+			_, _, _, err := l.Delete(ctx, key, rev)
+			return err
+		},
+	)
+
 	return nil
 }
 
@@ -257,7 +267,6 @@ func (l *LogStructured) Update(ctx context.Context, key string, value []byte, re
 	return rev, updateEvent.KV, true, err
 }
 
-// TODO: this might be where it's leaking.
 func (l *LogStructured) ttlEvents(ctx context.Context) chan *server.Event {
 	result := make(chan *server.Event)
 	wg := sync.WaitGroup{}
@@ -301,29 +310,108 @@ func (l *LogStructured) ttlEvents(ctx context.Context) chan *server.Event {
 	return result
 }
 
-func (l *LogStructured) ttl(ctx context.Context) {
-	// vary naive TTL support
-	mutex := &sync.Mutex{}
-	for event := range l.ttlEvents(ctx) {
-		go func(event *server.Event) {
-			metrics.TTLGoroutineCount.Inc()
-			defer metrics.TTLGoroutineCount.Dec()
+func (l *LogStructured) ttlExpirer(
+	ctx context.Context,
+	src <-chan *server.Event,
+	deleteFn func(context.Context, string, int64) error,
+) {
+	// TODO: since we know that values are monotonically increasing,
+	// i.e. all newly added keys will have expiration time in the future,
+	// we can utilise this for a more efficient scanning algorithm,
+	// where we can scan all the way up to cutoff point and expire everything in the past,
+	// rather than this current naive approach with a map.
+	var (
+		mtx = sync.Mutex{}
+		ttl = make(map[time.Time][]server.KeyValue)
+	)
 
+	// First goroutine consumes all listed / watched events with non-zero lease.
+	// Upon receiving an event from the source channel, it calculates the event expiry time,
+	// and puts it into `ttl` which maps expiry time to events which expire at that time.
+	go func() {
+		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Duration(event.KV.Lease) * time.Second):
-			}
+			case ev, more := <-src:
+				if !more {
+					return
+				}
 
-			mutex.Lock()
-			if _, _, _, err := l.Delete(ctx, event.KV.Key, event.KV.ModRevision); err != nil {
-				logrus.Errorf("failed to delete expired key: %v", err)
-				metrics.TTLDeletionsTotal.WithLabelValues(metrics.ResultError).Inc()
-			} else {
-				metrics.TTLDeletionsTotal.WithLabelValues(metrics.ResultSuccess).Inc()
+				if ev.KV == nil {
+					continue
+				}
+
+				kv := *ev.KV
+				exp := time.Now().Add(time.Duration(kv.Lease) * time.Second)
+
+				mtx.Lock()
+				// TODO: it's possible to have multiple revisions of the same key in the queue for expiry.
+				// When a new revision is added to the queue, we need to remove the old ones from the queue.
+				// This can be achieved by maintaining an index of keys present in the queue,
+				// checking it when receiving a new queue and removing the old revisions when necessary.
+				v, ok := ttl[exp]
+				if !ok {
+					v = make([]server.KeyValue, 0, 8) // TODO: figure out correct size here
+				}
+				v = append(v, kv)
+				ttl[exp] = v
+				mtx.Unlock()
 			}
-			mutex.Unlock()
-		}(event)
+		}
+	}()
+
+	// Second goroutine uses a timer to periodically checks the TTL map for expired keys.
+	// If such keys are found, they are forwarded to cleaner goroutines which simply delete the keys.
+	// After forwarding the keys, they are deleted from the TTL map to prevent them from being deleted again.
+	exp := make(chan server.KeyValue, 256) // TODO: make size configurable
+	go func() {
+		defer close(exp)
+
+		t := time.NewTicker(100 * time.Millisecond) // TODO: make interval configurable?
+		defer t.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case now := <-t.C:
+				mtx.Lock()
+				for ts, kvs := range ttl {
+					if ts.Before(now) {
+						for _, k := range kvs {
+							exp <- k
+						}
+
+						delete(ttl, ts)
+					}
+				}
+				mtx.Unlock()
+			}
+		}
+	}()
+
+	// A number of cleaner goroutines takes care of removing expired keys from the DB.
+	for i := 0; i < 16; i++ { // TODO: make the pool size configurable.
+		go func() {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case kv, more := <-exp:
+					if !more {
+						return
+					}
+
+					if err := deleteFn(ctx, kv.Key, kv.ModRevision); err != nil {
+						logrus.Errorf("failed to delete expired key: %v", err)
+						metrics.TTLDeletionsTotal.WithLabelValues(metrics.ResultError).Inc()
+					} else {
+						metrics.TTLDeletionsTotal.WithLabelValues(metrics.ResultSuccess).Inc()
+					}
+				}
+			}
+		}()
 	}
 }
 
@@ -349,7 +437,6 @@ func (l *LogStructured) Watch(ctx context.Context, prefix string, revision int64
 
 	logrus.Tracef("WATCH LIST key=%s rev=%d => rev=%d kvs=%d", prefix, revision, rev, len(kvs))
 
-	// TODO: add a metric here
 	go func() {
 		metrics.WatchGoroutineCount.Inc()
 		defer metrics.WatchGoroutineCount.Dec()
