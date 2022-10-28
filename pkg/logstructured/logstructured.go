@@ -318,6 +318,9 @@ func (l *LogStructured) ttl(ctx context.Context) {
 			mutex.Lock()
 			if _, _, _, err := l.Delete(ctx, event.KV.Key, event.KV.ModRevision); err != nil {
 				logrus.Errorf("failed to delete expired key: %v", err)
+				metrics.TTLDeletionsTotal.WithLabelValues(metrics.ResultError).Inc()
+			} else {
+				metrics.TTLDeletionsTotal.WithLabelValues(metrics.ResultSuccess).Inc()
 			}
 			mutex.Unlock()
 		}(event)

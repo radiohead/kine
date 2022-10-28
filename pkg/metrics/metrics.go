@@ -36,6 +36,11 @@ var (
 		Help: "Number of active TTL expiry goroutines",
 	})
 
+	TTLDeletionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "kine_ttl_deletions_total",
+		Help: "Total number of keys deleted due to TTL expirations",
+	}, []string{"result"})
+
 	WatchGoroutineCount = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "kine_active_watch_goroutines",
 		Help: "Number of active WATCH goroutines",
