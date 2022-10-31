@@ -3,9 +3,11 @@ package sqllog
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/cockroachdb/cockroach-go/v2/crdb"
 	"github.com/k3s-io/kine/pkg/broadcaster"
 	"github.com/k3s-io/kine/pkg/metrics"
 	"github.com/k3s-io/kine/pkg/server"
@@ -15,9 +17,9 @@ import (
 
 const (
 	compactInterval  = 5 * time.Minute
-	compactTimeout   = 5 * time.Second
+	compactTimeout   = 1 * time.Minute
 	compactMinRetain = 1000
-	compactBatchSize = 1000
+	compactBatchSize = 500
 	pollBatchSize    = 500
 )
 
@@ -69,34 +71,43 @@ func (s *SQLLog) compactStart(ctx context.Context) error {
 		return nil
 	}
 
-	t, err := s.d.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
-	if err != nil {
+	if err := crdb.ExecuteTx(
+		crdb.WithMaxRetries(ctx, 5),
+		s.d.GetDB(),
+		&sql.TxOptions{
+			Isolation: sql.LevelSerializable,
+		},
+		func(tx *sql.Tx) error {
+			t := s.d.WrapTx(tx)
+
+			// this is to work around a bug in which we ended up with two compact_rev_key rows
+			maxRev := int64(0)
+			maxID := int64(0)
+			for _, event := range events {
+				if event.PrevKV != nil && event.PrevKV.ModRevision > maxRev {
+					maxRev = event.PrevKV.ModRevision
+					maxID = event.KV.ModRevision
+				}
+				logrus.Tracef("COMPACTSTART maxRev=%v maxID=%v", maxRev, maxID)
+			}
+
+			for _, event := range events {
+				logrus.Tracef("COMPACTSTART event.KV.ModRevision=%v maxID=%v", event.KV.ModRevision, maxID)
+				if event.KV.ModRevision == maxID {
+					continue
+				}
+				if err := t.DeleteRevision(ctx, event.KV.ModRevision); err != nil {
+					return err
+				}
+			}
+
+			return nil
+		},
+	); err != nil {
 		return err
 	}
-	defer t.MustRollback()
 
-	// this is to work around a bug in which we ended up with two compact_rev_key rows
-	maxRev := int64(0)
-	maxID := int64(0)
-	for _, event := range events {
-		if event.PrevKV != nil && event.PrevKV.ModRevision > maxRev {
-			maxRev = event.PrevKV.ModRevision
-			maxID = event.KV.ModRevision
-		}
-		logrus.Tracef("COMPACTSTART maxRev=%v maxID=%v", maxRev, maxID)
-	}
-
-	for _, event := range events {
-		logrus.Tracef("COMPACTSTART event.KV.ModRevision=%v maxID=%v", event.KV.ModRevision, maxID)
-		if event.KV.ModRevision == maxID {
-			continue
-		}
-		if err := t.DeleteRevision(ctx, event.KV.ModRevision); err != nil {
-			return err
-		}
-	}
-
-	return t.Commit()
+	return nil
 }
 
 // compactor periodically compacts historical versions of keys.
@@ -148,7 +159,7 @@ outer:
 			if err != nil {
 				// ErrCompacted indicates that no further work is necessary - either compactRev changed since the
 				// last iteration because another client has compacted, or the requested revision has already been compacted.
-				if err == server.ErrCompacted {
+				if errors.Is(err, server.ErrCompacted) {
 					metrics.ObserveSQLCompaction(start, nil)
 					break
 				} else {
@@ -182,59 +193,60 @@ func (s *SQLLog) compact(compactRev int64, targetCompactRev int64) (int64, int64
 	ctx, cancel := context.WithTimeout(s.ctx, compactTimeout)
 	defer cancel()
 
-	t, err := s.d.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
-	if err != nil {
-		return compactRev, targetCompactRev, errors.Wrap(err, "failed to begin transaction")
-	}
-	defer func() {
-		if err := t.Rollback(); err != nil {
-			logrus.Debugf("COMPACT failed to rollback transaction: %v", err)
-		}
-	}()
+	var currentRevision int64
 
-	currentRev, err := t.CurrentRevision(s.ctx)
-	if err != nil {
-		return compactRev, targetCompactRev, errors.Wrap(err, "failed to get current revision")
-	}
+	if err := crdb.ExecuteTx(
+		crdb.WithMaxRetries(ctx, 5),
+		s.d.GetDB(),
+		&sql.TxOptions{
+			Isolation: sql.LevelSerializable,
+		},
+		func(tx *sql.Tx) error {
+			t := s.d.WrapTx(tx)
 
-	dbCompactRev, err := t.GetCompactRevision(s.ctx)
-	if err != nil {
-		return compactRev, targetCompactRev, errors.Wrap(err, "failed to get compact revision")
-	}
+			currentRev, err := t.CurrentRevision(s.ctx)
+			if err != nil {
+				return fmt.Errorf("failed to get current revision: %w", err)
+			}
+			currentRevision = currentRev
 
-	if compactRev != dbCompactRev {
-		logrus.Tracef("COMPACT compact revision changed since last iteration: %d => %d", compactRev, dbCompactRev)
-		return dbCompactRev, currentRev, server.ErrCompacted
-	}
+			dbCompactRev, err := t.GetCompactRevision(s.ctx)
+			if err != nil {
+				return fmt.Errorf("failed to get compact revision: %w", err)
+			}
 
-	// Ensure that we never compact the most recent 1000 revisions
-	targetCompactRev = safeCompactRev(targetCompactRev, currentRev)
+			if compactRev != dbCompactRev {
+				logrus.Tracef("COMPACT compact revision changed since last iteration: %d => %d", compactRev, dbCompactRev)
+				return server.ErrCompacted
+			}
 
-	// Don't bother compacting to a revision that has already been compacted
-	if targetCompactRev <= compactRev {
-		logrus.Tracef("COMPACT revision %d has already been compacted", targetCompactRev)
-		return dbCompactRev, currentRev, server.ErrCompacted
-	}
+			// Ensure that we never compact the most recent 1000 revisions
+			targetCompactRev = safeCompactRev(targetCompactRev, currentRev)
 
-	logrus.Tracef("COMPACT compactRev=%d targetCompactRev=%d currentRev=%d", compactRev, targetCompactRev, currentRev)
+			// Don't bother compacting to a revision that has already been compacted
+			if targetCompactRev <= compactRev {
+				logrus.Tracef("COMPACT revision %d has already been compacted", targetCompactRev)
+				return server.ErrCompacted
+			}
 
-	start := time.Now()
-	deletedRows, err := t.Compact(s.ctx, targetCompactRev)
-	if err != nil {
+			logrus.Tracef("COMPACT compactRev=%d targetCompactRev=%d currentRev=%d", compactRev, targetCompactRev, currentRev)
+			start := time.Now()
+			deletedRows, err := t.Compact(s.ctx, targetCompactRev)
+			if err != nil {
+				return fmt.Errorf("failed to compact to revision: %w", err)
+			}
+
+			if err := t.SetCompactRevision(s.ctx, targetCompactRev); err != nil {
+				return fmt.Errorf("failed to compact to record compact revision: %w", err)
+			}
+			logrus.Debugf("COMPACT deleted %d rows from %d revisions in %s - compacted to %d/%d", deletedRows, (targetCompactRev - compactRev), time.Since(start), targetCompactRev, currentRev)
+
+			return nil
+		}); err != nil {
 		return compactRev, targetCompactRev, errors.Wrapf(err, "failed to compact to revision %d", targetCompactRev)
 	}
 
-	if err := t.SetCompactRevision(s.ctx, targetCompactRev); err != nil {
-		return compactRev, targetCompactRev, errors.Wrap(err, "failed to record compact revision")
-	}
-
-	// TODO: this is failing - let's debug it.
-	if err := t.Commit(); err != nil {
-		return compactRev, targetCompactRev, errors.Wrapf(err, "failed to compact to revision %d", targetCompactRev)
-	}
-	logrus.Debugf("COMPACT deleted %d rows from %d revisions in %s - compacted to %d/%d", deletedRows, (targetCompactRev - compactRev), time.Since(start), targetCompactRev, currentRev)
-
-	return targetCompactRev, currentRev, nil
+	return targetCompactRev, currentRevision, nil
 }
 
 // postCompact executes any post-compact database cleanup - vacuuming, WAL truncate, etc.

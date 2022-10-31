@@ -122,6 +122,10 @@ func q(sql, param string, numbered bool) string {
 	})
 }
 
+func (d *Generic) GetDB() *sql.DB {
+	return d.DB
+}
+
 func (d *Generic) Migrate(ctx context.Context) {
 	var (
 		count     = 0

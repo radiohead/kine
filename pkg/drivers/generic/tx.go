@@ -19,16 +19,21 @@ type Tx struct {
 	d *Generic
 }
 
+func (d *Generic) WrapTx(src *sql.Tx) server.Transaction {
+	return &Tx{
+		x: src,
+		d: d,
+	}
+}
+
 func (d *Generic) BeginTx(ctx context.Context, opts *sql.TxOptions) (server.Transaction, error) {
 	logrus.Tracef("TX BEGIN")
 	x, err := d.DB.BeginTx(ctx, opts)
 	if err != nil {
 		return nil, err
 	}
-	return &Tx{
-		x: x,
-		d: d,
-	}, nil
+
+	return d.WrapTx(x), nil
 }
 
 func (t *Tx) Commit() error {
@@ -36,23 +41,9 @@ func (t *Tx) Commit() error {
 	return t.x.Commit()
 }
 
-func (t *Tx) MustCommit() {
-	if err := t.Commit(); err != nil {
-		logrus.Fatalf("Transaction commit failed: %v", err)
-	}
-}
-
 func (t *Tx) Rollback() error {
 	logrus.Tracef("TX ROLLBACK")
 	return t.x.Rollback()
-}
-
-func (t *Tx) MustRollback() {
-	if err := t.Rollback(); err != nil {
-		if err != sql.ErrTxDone {
-			logrus.Fatalf("Transaction rollback failed: %v", err)
-		}
-	}
 }
 
 func (t *Tx) GetCompactRevision(ctx context.Context) (int64, error) {

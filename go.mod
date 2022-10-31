@@ -5,9 +5,10 @@ go 1.16
 require (
 	github.com/Rican7/retry v0.1.0
 	github.com/canonical/go-dqlite v1.5.1
+	github.com/cockroachdb/cockroach-go/v2 v2.2.16
 	github.com/go-sql-driver/mysql v1.6.0
 	github.com/klauspost/compress v1.14.4
-	github.com/lib/pq v1.10.2
+	github.com/lib/pq v1.10.6
 	github.com/mattn/go-sqlite3 v1.14.15
 	github.com/nats-io/jsm.go v0.0.31-0.20220317133147-fe318f464eee
 	github.com/nats-io/nats.go v1.13.1-0.20220318132711-e0e03e374228

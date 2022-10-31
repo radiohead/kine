@@ -41,13 +41,13 @@ type Dialect interface {
 	IsFill(key string) bool
 	BeginTx(ctx context.Context, opts *sql.TxOptions) (Transaction, error)
 	GetSize(ctx context.Context) (int64, error)
+	GetDB() *sql.DB
+	WrapTx(from *sql.Tx) Transaction
 }
 
 type Transaction interface {
 	Commit() error
-	MustCommit()
 	Rollback() error
-	MustRollback()
 	GetCompactRevision(ctx context.Context) (int64, error)
 	SetCompactRevision(ctx context.Context, revision int64) error
 	Compact(ctx context.Context, revision int64) (int64, error)
