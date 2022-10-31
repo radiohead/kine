@@ -143,18 +143,22 @@ outer:
 				iterCompactRev = targetCompactRev
 			}
 
+			start := time.Now()
 			compactedRev, currentRev, err = s.compact(compactedRev, iterCompactRev)
 			if err != nil {
 				// ErrCompacted indicates that no further work is necessary - either compactRev changed since the
 				// last iteration because another client has compacted, or the requested revision has already been compacted.
 				if err == server.ErrCompacted {
+					metrics.ObserveSQLCompaction(start, nil)
 					break
 				} else {
 					logrus.Errorf("Compact failed: %v", err)
+					metrics.ObserveSQLCompaction(start, err)
 					metrics.CompactTotal.WithLabelValues(metrics.ResultError).Inc()
 					continue outer
 				}
 			}
+			metrics.ObserveSQLCompaction(start, nil)
 		}
 
 		if err := s.postCompact(); err != nil {
@@ -182,7 +186,11 @@ func (s *SQLLog) compact(compactRev int64, targetCompactRev int64) (int64, int64
 	if err != nil {
 		return compactRev, targetCompactRev, errors.Wrap(err, "failed to begin transaction")
 	}
-	defer t.MustRollback()
+	defer func() {
+		if err := t.Rollback(); err != nil {
+			logrus.Debugf("COMPACT failed to rollback transaction: %v", err)
+		}
+	}()
 
 	currentRev, err := t.CurrentRevision(s.ctx)
 	if err != nil {
@@ -220,7 +228,10 @@ func (s *SQLLog) compact(compactRev int64, targetCompactRev int64) (int64, int64
 		return compactRev, targetCompactRev, errors.Wrap(err, "failed to record compact revision")
 	}
 
-	t.MustCommit()
+	// TODO: this is failing - let's debug it.
+	if err := t.Commit(); err != nil {
+		return compactRev, targetCompactRev, errors.Wrapf(err, "failed to compact to revision %d", targetCompactRev)
+	}
 	logrus.Debugf("COMPACT deleted %d rows from %d revisions in %s - compacted to %d/%d", deletedRows, (targetCompactRev - compactRev), time.Since(start), targetCompactRev, currentRev)
 
 	return targetCompactRev, currentRev, nil

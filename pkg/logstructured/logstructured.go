@@ -403,12 +403,15 @@ func (l *LogStructured) ttlExpirer(
 						return
 					}
 
+					var (
+						st = time.Now()
+						rl = metrics.ResultSuccess
+					)
 					if err := deleteFn(ctx, kv.Key, kv.ModRevision); err != nil {
 						logrus.Errorf("failed to delete expired key: %v", err)
-						metrics.TTLDeletionsTotal.WithLabelValues(metrics.ResultError).Inc()
-					} else {
-						metrics.TTLDeletionsTotal.WithLabelValues(metrics.ResultSuccess).Inc()
+						rl = metrics.ResultError
 					}
+					metrics.SQLTTLDeletionTime.WithLabelValues(rl).Observe(time.Since(st).Seconds())
 				}
 			}
 		}()
@@ -438,8 +441,8 @@ func (l *LogStructured) Watch(ctx context.Context, prefix string, revision int64
 	logrus.Tracef("WATCH LIST key=%s rev=%d => rev=%d kvs=%d", prefix, revision, rev, len(kvs))
 
 	go func() {
-		metrics.WatchGoroutineCount.Inc()
-		defer metrics.WatchGoroutineCount.Dec()
+		metrics.SQLWatchGoroutineCount.Inc()
+		defer metrics.SQLWatchGoroutineCount.Dec()
 
 		lastRevision := revision
 		if len(kvs) > 0 {

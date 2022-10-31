@@ -31,20 +31,22 @@ var (
 		Help: "Total number of compactions",
 	}, []string{"result"})
 
-	TTLGoroutineCount = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "kine_ttl_cleanup_goroutines",
-		Help: "Number of active TTL expiry goroutines",
-	})
-
-	TTLDeletionsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "kine_ttl_deletions_total",
-		Help: "Total number of keys deleted due to TTL expirations",
-	}, []string{"result"})
-
-	WatchGoroutineCount = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "kine_active_watch_goroutines",
+	SQLWatchGoroutineCount = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "kine_sql_active_watch_goroutines",
 		Help: "Number of active WATCH goroutines",
 	})
+
+	SQLCompactionTime = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "kine_sql_compaction_latency_seconds",
+		Help:    "Histogram measuring the latency of database compaction operations",
+		Buckets: prometheus.ExponentialBuckets(0.001, 4, 8),
+	}, []string{"result"})
+
+	SQLTTLDeletionTime = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "kine_sql_ttl_deletion_latency_seconds",
+		Help:    "Histogram measuring the latency of deletions caused by TTL expiration",
+		Buckets: prometheus.ExponentialBuckets(0.001, 4, 8),
+	}, []string{"result"})
 )
 
 var (
@@ -60,4 +62,14 @@ func ObserveSQL(start time.Time, errCode string, sql util.Stripped, args ...inte
 	if SlowSQLThreshold > 0 && duration >= SlowSQLThreshold {
 		logrus.Infof("Slow SQL (started: %v) (total time: %v): %s : %v", start, duration, sql, args)
 	}
+}
+
+// ObserveSQLCompaction
+func ObserveSQLCompaction(start time.Time, err error) {
+	res := ResultSuccess
+	if err != nil {
+		res = ResultError
+	}
+
+	SQLCompactionTime.WithLabelValues(res).Observe(time.Since(start).Seconds())
 }
