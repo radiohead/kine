@@ -76,6 +76,7 @@ func Listen(ctx context.Context, config Config) (ETCDConfig, error) {
 			metrics.CompactTotal,
 			metrics.SQLCompactionTime,
 			metrics.SQLTTLDeletionTime,
+			metrics.SQLTTLCacheSize,
 			metrics.SQLWatchGoroutineCount,
 		)
 	}

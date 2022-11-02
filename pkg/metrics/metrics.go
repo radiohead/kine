@@ -42,6 +42,11 @@ var (
 		Buckets: prometheus.ExponentialBuckets(0.001, 4, 8),
 	}, []string{"result"})
 
+	SQLTTLCacheSize = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "kine_sql_ttl_deletion_cache_size",
+		Help: "Gauge measuring the size of the cache used by TTL expiration",
+	})
+
 	SQLTTLDeletionTime = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "kine_sql_ttl_deletion_latency_seconds",
 		Help:    "Histogram measuring the latency of deletions caused by TTL expiration",

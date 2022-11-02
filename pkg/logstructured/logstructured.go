@@ -344,7 +344,7 @@ func (l *LogStructured) ttlExpirer(
 				}
 
 				kv := *ev.KV
-				exp := time.Now().Add(time.Duration(kv.Lease) * time.Second)
+				exp := time.Now().Add(time.Duration(kv.Lease) * time.Second).UTC()
 
 				mtx.Lock()
 				// TODO: it's possible to have multiple revisions of the same key in the queue for expiry.
@@ -357,7 +357,10 @@ func (l *LogStructured) ttlExpirer(
 				}
 				v = append(v, kv)
 				ttl[exp] = v
+				size := float64(len(ttl))
 				mtx.Unlock()
+
+				metrics.SQLTTLCacheSize.Set(size)
 			}
 		}
 	}()
@@ -387,7 +390,10 @@ func (l *LogStructured) ttlExpirer(
 						delete(ttl, ts)
 					}
 				}
+				size := float64(len(ttl))
 				mtx.Unlock()
+
+				metrics.SQLTTLCacheSize.Set(size)
 			}
 		}
 	}()
