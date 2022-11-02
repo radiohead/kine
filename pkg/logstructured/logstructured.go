@@ -344,7 +344,7 @@ func (l *LogStructured) ttlExpirer(
 				}
 
 				kv := *ev.KV
-				exp := time.Now().Add(time.Duration(kv.Lease) * time.Second).UTC()
+				exp := time.Now().UTC().Add(time.Duration(kv.Lease) * time.Second).Truncate(time.Second)
 
 				mtx.Lock()
 				// TODO: it's possible to have multiple revisions of the same key in the queue for expiry.
